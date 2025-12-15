@@ -1,48 +1,74 @@
-from __future__ import annotations
-from typing import Any
-import pandas as pd
+# zero_touch_cx/tools/bigquery_tools.py
+
+from typing import List, Dict, Any
 from google.cloud import bigquery
-from .mock_store import load_csv
-from ..config import settings
-from ..observability import span
 
-def bq_query(sql: str, params: dict[str, Any] | None = None) -> dict:
-    with span("bq_query", mock=settings.mock_mode):
-        if settings.mock_mode:
-            return {"status": "error", "error": "Mock mode does not support arbitrary SQL.", "source": "mock"}
-        client = bigquery.Client(project=settings.project)
-        job = client.query(sql)
-        rows = [dict(r) for r in job.result()]
-        return {"status": "success", "rows": rows, "row_count": len(rows), "source": "bigquery"}
+# =====================================================
+# BigQuery Configuration (Console-defined resources)
+# =====================================================
 
-def get_usage_summary(customer_id: str, days: int = 30) -> dict:
-    with span("get_usage_summary", customer_id=customer_id, days=days):
-        if settings.mock_mode:
-            df = load_csv("usage_events.csv")
-            df = df[df["customer_id"] == customer_id].copy()
-            df["event_ts"] = pd.to_datetime(df["event_ts"])
-            cutoff = df["event_ts"].max() - pd.Timedelta(days=days)
-            df = df[df["event_ts"] >= cutoff]
-            if df.empty:
-                return {"status":"success","days":days,"top_feature":None,"total_events":0,"source":"mock"}
-            top = df.groupby("feature")["value"].sum().sort_values(ascending=False).head(1)
-            return {"status":"success","days":days,"top_feature":top.index[0],"total_events":int(df["value"].sum()),"source":"mock"}
-        return {"status":"success","days":days,"top_feature":None,"total_events":0,"source":"bigquery"}
+# 🔹 MUST match your GCP Console
+PROJECT_ID = "ccibt-hack25ww7-704"          # e.g. my-gcp-project
+DATASET_ID = "client_report_data"          # ✅ as requested
+WIRE_EVENTS_TABLE = "report_event"       # table inside dataset
 
-def get_wire_status_kpis(customer_id: str, days: int = 30) -> dict:
-    with span("get_wire_status_kpis", customer_id=customer_id, days=days):
-        if settings.mock_mode:
-            df = load_csv("report_events.csv")
-            df = df[(df["customer_id"]==customer_id) & (df["report_id"]=="T-1004")].copy()
-            df["run_ts"] = pd.to_datetime(df["run_ts"])
-            if df.empty:
-                return {"status":"success","days":days,"pending_count":0,"completion_rate":0.0,"failed_count":0,"source":"mock"}
-            cutoff = df["run_ts"].max() - pd.Timedelta(days=days)
-            df = df[df["run_ts"] >= cutoff]
-            total = len(df)
-            success = int((df["status"]=="SUCCESS").sum())
-            fail = int((df["status"]=="FAILED").sum())
-            completion_rate = (success/total) if total else 0.0
-            pending = max(0, int(total*0.15 - fail))
-            return {"status":"success","days":days,"pending_count":pending,"completion_rate":round(completion_rate,3),"failed_count":fail,"source":"mock"}
-        return {"status":"success","days":days,"pending_count":0,"completion_rate":0.0,"failed_count":0,"source":"bigquery"}
+# Fully-qualified table name
+WIRE_EVENTS_FQN = f"{PROJECT_ID}.{DATASET_ID}.{WIRE_EVENTS_TABLE}"
+
+# Singleton client (recommended)
+_bq_client: bigquery.Client | None = None
+
+
+def _get_client() -> bigquery.Client:
+    global _bq_client
+    if _bq_client is None:
+        _bq_client = bigquery.Client(project=PROJECT_ID)
+    return _bq_client
+
+
+# =====================================================
+# Public API used by reporting_agent
+# =====================================================
+
+def fetch_wire_status_report(
+    customer_id: str,
+    days: int = 30
+) -> List[Dict[str, Any]]:
+    """
+    Fetch wire status events for a customer
+    from BigQuery dataset `reporting_agent`.
+
+    - Secure (parameterized query)
+    - Read-only
+    - Works with ADK Web locally
+    """
+
+    query = f"""
+        SELECT
+            customer_id
+        FROM `{WIRE_EVENTS_FQN}`
+        WHERE customer_id = @customer_id
+          AND event_ts >= TIMESTAMP_SUB(
+                CURRENT_TIMESTAMP(),
+                INTERVAL @days DAY
+          )
+        ORDER BY event_ts DESC
+        LIMIT 500
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(
+                "customer_id", "STRING", customer_id
+            ),
+            bigquery.ScalarQueryParameter(
+                "days", "INT64", days
+            ),
+        ]
+    )
+
+    client = _get_client()
+    query_job = client.query(query, job_config=job_config)
+    rows = query_job.result()
+
+    return [dict(row) for row in rows]

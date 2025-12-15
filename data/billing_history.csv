@@ -1,0 +1,5 @@
+customer_id,plan,start_date,mrr_usd
+cust_001,Basic,2025-01-01,0
+cust_001,Starter,2025-06-01,19
+cust_002,Basic,2025-01-01,0
+cust_002,Starter,2025-06-01,19

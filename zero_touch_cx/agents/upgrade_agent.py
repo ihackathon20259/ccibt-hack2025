@@ -1,48 +1,37 @@
-from __future__ import annotations
-from google.adk.agents.llm_agent import Agent
-from ..tools.billing_tools import check_upgrade_eligibility, simulate_pricing, execute_upgrade
-from ..tools.policy_tools import policy_check
-from ..tools.rag_tools import rag_search
-from ..schemas import UpgradeDecision
-import json
 
-INSTRUCTION = (
-    "You are the Upgrade Agent. Provide UpgradeDecision JSON. "
-    "Always run policy_check before execute_upgrade. "
-    "Never execute without explicit 'CONFIRM UPGRADE'."
+from google.adk.agents import Agent
+from .tools import (
+    check_eligibility,
+    get_customer_plan,
+    suggest_higher_plan_with_benefits
 )
-
-def handle_upgrade(customer_id: str, requested_plan: str, user_text: str) -> dict:
-    elig = check_upgrade_eligibility(customer_id, requested_plan)
-    sim = simulate_pricing(customer_id, requested_plan)
-
-    decision = UpgradeDecision(
-        customer_id=customer_id,
-        current_plan=elig.get("current_plan","Unknown"),
-        requested_plan=requested_plan,
-        eligible=bool(elig.get("eligible", False)),
-        reasons=list(elig.get("reasons", [])),
-        simulated_monthly_price_usd=(sim.get("monthly_price_usd") if sim.get("status")=="success" else None),
-        requires_confirmation=True,
-        next_best_actions=[f"Reply: CONFIRM UPGRADE to {requested_plan} to proceed."],
-        confidence=0.85 if elig.get("eligible") else 0.7,
-    )
-
-    if "confirm upgrade" in user_text.lower() and decision.eligible:
-        pol = policy_check("upgrade_plan", user_text)
-        if pol.get("status") == "allow":
-            execute_upgrade(customer_id, requested_plan)
-            decision.requires_confirmation = False
-            decision.next_best_actions = ["Upgrade executed. Monitor usage in 24 hours."]
-        else:
-            decision.reasons.append(pol.get("reason","Denied by policy."))
-
-    return json.loads(decision.model_dump_json())
-
+# --------------------------
+# Root Agent
+# --------------------------
 upgrade_agent = Agent(
-    model="gemini-3-pro-preview",
     name="upgrade_agent",
-    description="Handles plan upgrades with guardrails and billing simulation.",
-    instruction=INSTRUCTION,
-    tools=[rag_search, policy_check, check_upgrade_eligibility, simulate_pricing, execute_upgrade, handle_upgrade],
+    model="gemini-2.0-flash",
+    description="Root agent that identifies customer, report/feature, returns eligibility, provides current plan, and upgrade suggestions",
+    instruction="""
+You are the Root Plan Eligibility Agent.
+
+Rules:
+1. Identify the customer's ID from the query using only approved customer names.
+2. Identify the requested report or feature using only approved synonyms.
+3. Never guess or infer names or features not in your approved lists.
+4. Call check_eligibility for any feature/report requests.
+5. Call get_customer_plan when the user asks about their current plan and Call suggest_higher_plan_with_benefits if current_plan is Bronze or Silver.
+Call suggest_higher_plan_with_benefits if feature is OPTIONAL or NOT_AVAILABLE to suggest next plan and show benefits.
+6. If the requested feature/report is INCLUDED → respond simply that it is included.
+7. If the requested feature/report is OPTIONAL or NOT_AVAILABLE:
+   a. Loudly alert the user that it is not included in their current plan.
+   b. Suggest the next higher plan available.
+   c. Include **key benefits** of that higher plan (i.e., all additional features/reports it includes that the user currently does not have).
+8. Always provide factual, non-hallucinated answers.
+9. Answer follow-up questions naturally and accurately.
+10. Never provide JSON for OPTIONAL or NOT_AVAILABLE responses; use user-friendly messages instead.
+11. Always prioritize helping the user understand what plan upgrade they would gain and why it is valuable.
+"""
+,
+    tools=[check_eligibility, get_customer_plan,suggest_higher_plan_with_benefits]
 )

@@ -3,13 +3,16 @@ from typing import Literal
 from ..observability import span
 import re
 
-Intent = Literal["report_request","plan_upgrade","ambiguous","other"]
+Intent = Literal["report_request","plan_upgrade","ambiguous","other", "billing_inquiry"]
 
 def classify_intent(user_text: str) -> dict:
     with span("classify_intent"):
         t = user_text.lower()
         report = bool(re.search(r"\breport\b|status report|wire status", t))
         upgrade = bool(re.search(r"\bupgrade\b|\bpro\b|plan\b", t))
+        billing = bool(re.search(r"\bbilling\b", t))
+        if billing:
+            return {"intent":"billing_inquiry","confidence":0.85}
         if report and upgrade:
             return {"intent":"ambiguous","confidence":0.55}
         if report:
